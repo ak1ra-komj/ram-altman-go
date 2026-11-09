@@ -1,6 +1,8 @@
 # Ram-Altman
 
-**A bash script that writes to Sam Altman once a day to report the RAM he missed.**
+**A small cross-platform program that writes to Sam Altman once a day to report the RAM he missed.**
+
+This is the Go fork maintained at **[ak1ra-komj/ram-altman-go](https://github.com/ak1ra-komj/ram-altman-go)**, based on the original [IainKay/ram-altman](https://github.com/IainKay/ram-altman).
 
 Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no install needed.
 
@@ -8,7 +10,8 @@ Read the sample emails at **[ram-altman.lol](https://ram-altman.lol)**, no insta
 ![Global DRAM allocation: quite terrible](https://img.shields.io/badge/global%20DRAM%20allocation-quite%20terrible-red)
 ![Utilization: maybe 5%](https://img.shields.io/badge/utilization-maybe%205%25-orange)
 ![Emails: 1 per day](https://img.shields.io/badge/emails-1%20per%20day-blue)
-![Written in Bash, not Electron](https://img.shields.io/badge/written%20in-bash%2C%20not%20electron-brightgreen)
+![Runs on Linux, macOS and Windows](https://img.shields.io/badge/runs%20on-Linux%20%7C%20macOS%20%7C%20Windows-informational)
+![Written in Go, still not Electron](https://img.shields.io/badge/written%20in-Go%2C%20still%20not%20Electron-brightgreen)
 
 There is RAM in your computer. Right now. Just sitting there, in a *personal* computer, being personal.
 
@@ -22,17 +25,18 @@ That RAM, he added, is ["being used maybe 5% of the time"](https://www.xda-devel
 
 Which raised an obvious question for a certain kind of person: *surely someone should be monitoring this?*
 
-So we wrote a script. If your machine has more than 10% of its RAM available, it sends one email a day to let Sam know. It seemed only fair. He can't fix the problem if nobody tells him where the RAM is.
+So we wrote a program. If your machine has more than 10% of its RAM available, it sends one email a day to let Sam know. It seemed only fair. He can't fix the problem if nobody tells him where the RAM is.
 
 ## Features
 
-- Tracks total, used and available RAM, plus your standing with the global allocation authorities
-- Handles page cache correctly, which already puts it ahead of most arguments about RAM
+- Tracks total, used and available RAM on Linux, macOS and Windows
+- Handles Linux page cache correctly, which already puts it ahead of most arguments about RAM
 - Sends at most one email per day, because we're hoarders, not animals
 - Rotates 8 subject lines, 10 messages and 6 sign-offs, so the joke gets old at a carefully managed pace
 - Logs every sample to CSV for when the auditors arrive
-- Ships with 14 tests, more than the DRAM market has had sensible outcomes
-- Is written in bash, as an Electron version would have solved the problem by using all the RAM
+- Ships with tests, more than the DRAM market has had sensible outcomes
+- Can send through SMTP directly, or through a local `sendmail` / `msmtp` / `mail` command where available
+- Is written in Go, as an Electron version would have solved the problem by using all the RAM
 
 ## A sample of today's correspondence
 
@@ -58,31 +62,52 @@ The figures are real. They come from your machine. That's the worrying part.
 ## What counts as "used"?
 
 ```text
-used = MemTotal - MemAvailable
+used = total - available
 ```
 
-`MemAvailable` is the kernel's own estimate of how much memory programs could claim without swapping. Free RAM counts as available. So does cache the kernel can reclaim. tmpfs and shared memory don't, because they can't simply be handed back.
+- **Linux**: `available` is `MemAvailable`, the kernel's own estimate of how much memory programs could claim without swapping. On kernels older than 3.14, it is estimated as free memory plus reclaimable cache.
+- **macOS**: there is no exact `MemAvailable` equivalent. The program uses free pages plus inactive pages, which is deliberately conservative.
+- **Windows**: `available` is `GlobalMemoryStatusEx().ullAvailPhys`, the physical memory Windows says can be reused immediately.
+
+On Linux, free RAM counts as available. So does cache the kernel can reclaim. tmpfs and shared memory don't, because they can't simply be handed back.
 
 Every sysadmin has spent years explaining that [Linux didn't eat your RAM](https://www.linuxatemyram.com/) and that free RAM is wasted RAM. It took decades for someone important to agree with the second part, and he'd like it shipped to him.
 
 Strictly speaking, the page cache is doing useful work, so counting it as available is a generous concession to the other side. Think of it as a plea bargain.
 
-On kernels older than 3.14, which have no `MemAvailable`, the script estimates it from free memory plus reclaimable cache. If you're on one of those, your RAM may be safe. Nobody's coming for that.
-
 ## Installation
 
-You'll need Linux, bash, and a working `sendmail`, `msmtp` or `mail` command. Your RAM is assumed.
+You'll need Go 1.25 or newer if you build from source. The supported targets are 64-bit Linux, macOS and Windows (amd64/arm64). Your RAM is assumed.
 
 ```bash
-git clone https://github.com/IainKay/ram-altman.git
-cd ram-altman
-chmod +x ram-altman.sh test-ram-altman.sh
+git clone https://github.com/ak1ra-komj/ram-altman-go.git
+cd ram-altman-go
+go build ./cmd/ram-altman
 
-./ram-altman.sh --status    # see the evidence against you
-./ram-altman.sh --dry-run   # preview an email without sending it
+./ram-altman --status    # see the evidence against you
+./ram-altman --dry-run   # preview an email without sending it
 ```
 
-Example output, from a simulated machine that has confessed to everything:
+On Windows, the same command produces `ram-altman.exe`:
+
+```powershell
+go build ./cmd/ram-altman
+```
+
+You can also install it with:
+
+```bash
+go install github.com/ak1ra-komj/ram-altman-go/cmd/ram-altman@latest
+```
+
+Cross-compiling is just as boring:
+
+```bash
+GOOS=windows GOARCH=amd64 go build -o ram-altman.exe ./cmd/ram-altman
+GOOS=darwin  GOARCH=arm64 go build -o ram-altman-macos ./cmd/ram-altman
+```
+
+Example `--status` output, from a simulated machine that has confessed to everything:
 
 ```text
 Total:      15.3 GiB
@@ -92,25 +117,159 @@ Available:  8.6 GiB (56.2%)
   Cache:    8.2 GiB
 ```
 
-To run it for real, add this to your crontab with `crontab -e`:
+## Configuration
+
+The program reads a flat `key=value` file. The default location is:
+
+| Platform | Config file |
+| --- | --- |
+| Linux | `${XDG_CONFIG_HOME:-~/.config}/ram-altman.conf` |
+| macOS | `~/Library/Application Support/ram-altman.conf` |
+| Windows | `%AppData%\ram-altman.conf` |
+
+Use `--config PATH` or `RAM_ALTMAN_CONFIG` to point somewhere else. Environment variables override the config file.
+
+```ini
+to=sam@example.com
+from=you@example.com
+from_name=Your Name
+threshold=10
+
+# SMTP submission. Leave smtp_host empty to use a local MTA.
+smtp_host=smtp.example.com
+smtp_port=587
+smtp_tls=starttls
+smtp_user=you@example.com
+smtp_password_env=RAM_ALTMAN_SMTP_PASSWORD
+```
+
+Put the password in the named environment variable:
+
+```bash
+export RAM_ALTMAN_SMTP_PASSWORD='your app password'
+```
+
+You can also use `RAM_ALTMAN_SMTP_PASSWORD` directly, or `smtp_password=` in the config file. The config file is per-user, so protect it if it contains a password.
+
+`--test-email` sends one test message and exits. It does not write the daily state, so it cannot make the real email skip a day.
+
+```bash
+./ram-altman --test-email
+```
+
+### SMTP
+
+`net/smtp` is enough for the common providers:
+
+- `smtp_tls=starttls` for port 587
+- `smtp_tls=implicit` for port 465
+- `smtp_tls=none` only for a trusted local relay; credentials over plaintext are refused unless the host is localhost
+- `smtp_tls=auto` picks implicit for port 465 and STARTTLS otherwise
+
+Authentication supports PLAIN and LOGIN. Gmail, iCloud and Fastmail work with an app password. Providers that require OAuth2 for SMTP, such as some Microsoft 365 tenants, are not supported by the built-in client; use `msmtp` with an existing OAuth2 setup and set `transport=msmtp`.
+
+### Local mail commands
+
+If `smtp_host` is empty, the program falls back to a local mail command:
+
+| Platform | Auto-detected |
+| --- | --- |
+| Linux | `sendmail`, then `msmtp`, then `mail` |
+| macOS | `msmtp` only |
+| Windows | none; configure SMTP |
+
+macOS ships with `sendmail` and `mail`, but they route through Postfix, which is not enabled as a service by default. Messages can sit in a queue forever, so the program does not select them automatically. Use SMTP, install `msmtp`, or set `transport=sendmail` explicitly if you know your Postfix setup works.
+
+### Settings
+
+| Config key | Environment variable | Default |
+| --- | --- | --- |
+| `to` | `RAM_ALTMAN_TO` | Required |
+| `from` | `RAM_ALTMAN_FROM` | Required |
+| `from_name` | `RAM_ALTMAN_FROM_NAME` | `A concerned RAM owner` |
+| `threshold` | `RAM_ALTMAN_THRESHOLD` | `10` |
+| `state_dir` | `RAM_ALTMAN_STATE_DIR` | Platform state directory |
+| `transport` | `RAM_ALTMAN_TRANSPORT` | `auto` |
+| `smtp_host` | `RAM_ALTMAN_SMTP_HOST` | Empty (use local MTA) |
+| `smtp_port` | `RAM_ALTMAN_SMTP_PORT` | `587` |
+| `smtp_tls` | `RAM_ALTMAN_SMTP_TLS` | `auto` |
+| `smtp_user` | `RAM_ALTMAN_SMTP_USER` | Empty (no auth) |
+| `smtp_password` | `RAM_ALTMAN_SMTP_PASSWORD` | Empty |
+| `smtp_password_env` | `RAM_ALTMAN_SMTP_PASSWORD_ENV` | Empty |
+
+`transport` can be `auto`, `smtp`, `sendmail`, `msmtp` or `mail`.
+
+On Linux, `RAM_ALTMAN_MEMINFO` can point at a different `meminfo` file. It is mainly there for tests.
+
+## Scheduling
+
+The program samples on every run and sends at most one email per day. Run it every five minutes.
+
+### Linux
 
 ```cron
 RAM_ALTMAN_TO=recipient@example.com
 RAM_ALTMAN_FROM=you@example.com
 RAM_ALTMAN_FROM_NAME=Your Name
 
-*/5 * * * * /path/to/ram-altman.sh
+*/5 * * * * /path/to/ram-altman
 ```
 
-It samples every five minutes and emails at most once a day. If a send fails, it tries again on the next run, because this message matters.
+If you use the config file, the crontab only needs the command. If a send fails, it tries again on the next run, because this message matters.
 
-| Setting | What it does | Default |
-| --- | --- | --- |
-| `RAM_ALTMAN_TO` | Who receives the bad news | Required |
-| `RAM_ALTMAN_FROM` | A real address you can send from | Required |
-| `RAM_ALTMAN_FROM_NAME` | Your name, or your nom de RAM | Optional |
-| `RAM_ALTMAN_THRESHOLD` | Email when available RAM is above this percentage (whole number) | `10` |
-| `RAM_ALTMAN_STATE_DIR` | Where the log and state files live | `~/.local/state/ram-altman` |
+### macOS
+
+Save this as `~/Library/LaunchAgents/lol.ram-altman.plist`, replacing the paths:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>lol.ram-altman</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/ram-altman</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Load it with:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/lol.ram-altman.plist
+```
+
+### Windows
+
+Run this in PowerShell, adjusting the path:
+
+```powershell
+$action = New-ScheduledTaskAction -Execute 'C:\Tools\ram-altman.exe'
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    -RepetitionInterval (New-TimeSpan -Minutes 5) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
+Register-ScheduledTask -TaskName 'Ram Altman' -Action $action -Trigger $trigger -Settings $settings
+```
+
+Run the task as yourself so it can read your config file. If the machine was asleep, the next run catches up; the daily marker stops it sending twice.
+
+### State and logs
+
+| Platform | Default state directory |
+| --- | --- |
+| Linux | `${XDG_STATE_HOME:-~/.local/state}/ram-altman` |
+| macOS | `~/Library/Application Support/ram-altman` |
+| Windows | `%LocalAppData%\ram-altman` |
+
+The directory contains `usage.csv`, `last_sent` and the rotation bags, plus a lock file while the program is running. The CSV columns are unchanged from the Bash version.
 
 ## Audit yourself
 
@@ -122,7 +281,19 @@ awk -F, 'NR>1 { used += $3; total += $2 }
   ~/.local/state/ram-altman/usage.csv
 ```
 
+On macOS, point the command at the state directory from the table above. On Windows, open the CSV in a spreadsheet or run the command in WSL.
+
 Yes, share of memory in use isn't the same thing as share of time spent in use. If you came here to say that, welcome to Hacker News. We're glad you're here.
+
+## Migrating from the Bash version
+
+The environment variables, CSV columns, `last_sent` and rotation bags are unchanged. On Linux, the default state directory is also unchanged, so existing history keeps working.
+
+The old `ram-altman.sh` is still in git history. Update your scheduler to run the new binary instead:
+
+```cron
+*/5 * * * * /path/to/ram-altman
+```
 
 ## Please be a good neighbour
 
@@ -144,7 +315,10 @@ No.
 The memory accounting is. The correspondence isn't.
 
 **Does it work on macOS?**
-No, it reads `/proc/meminfo`. On the other hand, your RAM is probably soldered down, which makes you the hardest target in the global allocation programme.
+Yes. There is no exact `MemAvailable` equivalent, so it counts free plus inactive pages. Your RAM may still be soldered down, which makes you the hardest target in the global allocation programme.
+
+**Does it work on Windows?**
+Yes. Use SMTP; Windows has no `sendmail` to fall back on.
 
 **Why is the threshold 10%?**
 Below that, your machine has suffered enough.
@@ -153,10 +327,19 @@ Below that, your machine has suffered enough.
 Briefly. It's then returned to the global pool, which is more than can be said for the rest of us.
 
 **Can I run the tests without emailing anyone?**
-Yes. `./test-ram-altman.sh` uses simulated memory and a fake `sendmail`. No inboxes are harmed.
+Yes:
+
+```bash
+go test ./...
+```
+
+The tests use simulated memory and a fake SMTP server. No inboxes are harmed.
 
 **Can I see it without installing anything?**
 Yes. [ram-altman.lol](https://ram-altman.lol) cycles through the real emails, with sample figures.
+
+**Why Go?**
+Because unlike an Electron app, it only uses RAM while it's running.
 
 **What should I do with all this RAM?**
 Open another browser tab. You've still got time.
@@ -171,7 +354,7 @@ He [followed up](https://www.gadgetreview.com/sam-altman-says-he-wants-you-to-ha
 
 The original remarks [came up in a discussion of running AI models locally](https://www.engadget.com/2303266/sam-altman-says-its-terrible-dram-computer/), and the utilization argument is a real one: servers really are busier than your desktop. We just think it's funnier to reply with cron.
 
-Besides, if he wants you to have so much RAM, then this script isn't a complaint at all. It's a daily progress report.
+Besides, if he wants you to have so much RAM, then this program isn't a complaint at all. It's a daily progress report.
 
 ## License
 
